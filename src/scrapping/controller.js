@@ -337,28 +337,48 @@ export async function extract(req, res) {
     const messagesData = [];
     const documentsData = [];
 
-    const messageRows = await page.$$("table.rgMasterTable tbody tr");
-    console.log(`\nFound ${messageRows.length} message rows`);
+    // Extract message metadata (MessageID, chk, subject, date) from table without clicking
+    const messageMetadata = await page.evaluate(() => {
+      const rows = Array.from(document.querySelectorAll("table.rgMasterTable tbody tr"));
+      return rows.map((row, index) => {
+        const cells = row.querySelectorAll("td");
+        if (cells.length < 6) return null;
+        
+        const subject = cells[3]?.innerText?.trim() || "";
+        const dateSent = cells[4]?.innerText?.trim() || "";
+        const chkCell = cells[5]; // hidden cell with chk value
+        const chk = chkCell?.innerText?.trim() || "";
+        
+        // Get MessageID from data key
+        const messageId = row.getAttribute("id")?.match(/\d+$/)?.[0] || "";
+        
+        return { index: index + 1, subject, dateSent, chk, messageId };
+      }).filter(m => m && m.messageId && m.chk);
+    });
 
-    for (let i = 0; i < messageRows.length; i++) {
+    console.log(`\nFound ${messageMetadata.length} messages to process`);
+
+    // Process each message by navigating to its URL directly (avoids modal clicking issues)
+    for (const msgMeta of messageMetadata) {
       try {
-        const cells = await messageRows[i].$$("td");
-        if (cells.length < 4) continue;
+        console.log(`\nProcessing message ${msgMeta.index}: ${msgMeta.subject}`);
+        
+        // Navigate directly to message URL instead of clicking
+        const messageUrl = `${currentPageUrl.split("?")[0].replace("/complaints", "/complaints/message")}?msg=${msgMeta.messageId}&chk=${msgMeta.chk}`;
+        await page.goto(messageUrl, { waitUntil: "networkidle", timeout: 60000 });
+        await page.waitForTimeout(1500);
 
-        const subject = await cells[3].evaluate((el) => el.innerText?.trim());
-        const dateSent = await cells[4]?.evaluate((el) => el.innerText?.trim());
-        console.log(`\nProcessing message ${i + 1}: ${subject}`);
-
-        await messageRows[i].click();
-        await page.waitForTimeout(2500);
-
+        // Extract message data from the loaded page
         const msgData = await page.evaluate(() => {
-          const from = document.querySelector("span#cp1_mv1_lblFrom")?.innerText?.trim();
+          // Check if we're in an iframe or main page context
+          const from = document.querySelector("span#cp1_mv1_lblFrom")?.innerText?.trim() ||
+                       document.querySelector("span[id*='lblFrom']")?.innerText?.trim() || "";
           const toElements = document.querySelectorAll(".fld");
-          const to = toElements.length > 1 ? toElements[1].innerText?.trim() : null;
-          const sent = document.querySelector("span#cp1_mv1_lblSent")?.innerText?.trim();
+          const to = toElements.length > 1 ? toElements[1].innerText?.trim() : "";
+          const sent = document.querySelector("span#cp1_mv1_lblSent")?.innerText?.trim() ||
+                       document.querySelector("span[id*='lblSent']")?.innerText?.trim() || "";
           const sectionToPrint = document.querySelector("#section-to-print");
-          const fullContent = sectionToPrint ? sectionToPrint.innerText?.trim() : null;
+          const fullContent = sectionToPrint ? sectionToPrint.innerText?.trim() : "";
 
           let consumerMessage = null;
           let bbsMessage = null;
@@ -408,19 +428,19 @@ export async function extract(req, res) {
             fileName: link.fileName,
             href: link.href,
             complaintId: safeComplaintId,
-            currentPageUrl: page.url()
+            currentPageUrl: messageUrl
           });
           downloadedFiles.push(fileResult);
         }
 
         messagesData.push({
-          index: i + 1,
-          subject,
-          dateSent,
+          index: msgMeta.index,
+          subject: msgMeta.subject,
+          dateSent: msgMeta.dateSent,
           from: msgData.from,
           to: msgData.to,
           sent: msgData.sent,
-          messageType: subject?.toLowerCase().includes("consumer")
+          messageType: msgMeta.subject?.toLowerCase().includes("consumer")
             ? "consumer_comment"
             : "bbb_message",
           bbsMessage: msgData.bbsMessage,
@@ -429,15 +449,12 @@ export async function extract(req, res) {
           attachments: attachmentLinks
         });
 
-        await page.goBack({ waitUntil: "networkidle" });
-        await page.waitForTimeout(2000);
+        // Navigate back to main complaint page
+        await page.goto(url, { waitUntil: "networkidle", timeout: 60000 });
+        await page.waitForTimeout(1000);
 
-        const updatedRows = await page.$$("table.rgMasterTable tbody tr");
-        if (updatedRows.length > 0) {
-          messageRows.splice(0, messageRows.length, ...updatedRows);
-        }
       } catch (error) {
-        console.error(`Error processing message ${i + 1}:`, error.message);
+        console.error(`Error processing message ${msgMeta.index}:`, error.message);
       }
     }
 

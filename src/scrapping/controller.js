@@ -382,39 +382,73 @@ export async function extract(req, res) {
             const subject = spanText("lblSubject") || fieldByLabel("Subject:");
 
             // #section-to-print is visibility:hidden by default (only shown on @media print)
-            // so innerText returns "". Use #trmsg which is always visible — it wraps the
-            // "originally read on" alert + the actual letter content.
-            // We want just the letter body, so skip the alert-dark banner at the top.
+            // so innerText returns "". Use #trmsg which is always visible.
+            //
+            // We need to:
+            //   1. Remove the letterhead block (.litLetterhead) — BBB address/logo noise
+            //   2. Remove the "This message originally read on..." alert banner (.alert-dark)
+            //   3. Replace all <br> tags with newline sentinels before reading innerText,
+            //      because innerText collapses <br> into nothing in some engines
+            //   4. Clean up excess blank lines from the result
             let fullContent = "";
             const trmsg = document.querySelector("#trmsg");
             if (trmsg) {
-              // Remove the "This message originally read on..." alert text
               const clone = trmsg.cloneNode(true);
-              const alertBanner = clone.querySelector(".alert-dark");
-              if (alertBanner) alertBanner.remove();
-              fullContent = clone.innerText?.trim() || "";
+
+              // Strip the "originally read on" alert banner
+              clone.querySelectorAll(".alert-dark").forEach(el => el.remove());
+
+              // Strip the BBB letterhead block (logo + address table)
+              clone.querySelectorAll(".litLetterhead").forEach(el => el.remove());
+
+              // Also strip the date line that sits right after the letterhead
+              // It's a div.hdrtbldate — remove it too
+              clone.querySelectorAll(".hdrtbldate").forEach(el => el.remove());
+
+              // Replace every <br> with a newline marker so innerText preserves line breaks
+              clone.querySelectorAll("br").forEach(br => {
+                br.replaceWith("\n");
+              });
+
+              // Collapse runs of 3+ newlines down to 2 (one blank line)
+              fullContent = (clone.innerText || "")
+                .replace(/\n{3,}/g, "\n\n")
+                .trim();
             }
             if (!fullContent) {
-              // Fallback: try .msg wrapper
+              // Fallback: try .msg wrapper with same br treatment
               const msgDiv = document.querySelector(".msg");
-              if (msgDiv) fullContent = msgDiv.innerText?.trim() || "";
+              if (msgDiv) {
+                const clone = msgDiv.cloneNode(true);
+                clone.querySelectorAll("br").forEach(br => br.replaceWith("\n"));
+                fullContent = (clone.innerText || "").replace(/\n{3,}/g, "\n\n").trim();
+              }
             }
 
-            // Split consumer statement from BBB letter body
+            // Split consumer info section from the main letter body.
+            // "CUSTOMER EXPERIENCE INFORMATION" is a reliable marker that appears
+            // right before the consumer details block at the bottom of BBB letters.
             let bbsMessage = null;
             let consumerMessage = null;
             if (fullContent) {
-              const marker = "Customer\u2019s Statement of the Problem:";
-              const altMarker = "Customer's Statement of the Problem:";
-              const markerIdx = fullContent.indexOf(marker) !== -1
-                ? fullContent.indexOf(marker)
-                : fullContent.indexOf(altMarker);
-
-              if (markerIdx !== -1) {
-                bbsMessage = fullContent.slice(0, markerIdx).trim();
-                consumerMessage = fullContent.slice(markerIdx).trim();
+              const ceMarker = "CUSTOMER EXPERIENCE INFORMATION";
+              const ceIdx = fullContent.indexOf(ceMarker);
+              if (ceIdx !== -1) {
+                bbsMessage = fullContent.slice(0, ceIdx).trim();
+                consumerMessage = fullContent.slice(ceIdx).trim();
               } else {
-                bbsMessage = fullContent;
+                // Fallback: split on Customer's Statement marker
+                const stmtMarker = "Customer\u2019s Statement of the Problem:";
+                const altStmtMarker = "Customer's Statement of the Problem:";
+                const stmtIdx = fullContent.indexOf(stmtMarker) !== -1
+                  ? fullContent.indexOf(stmtMarker)
+                  : fullContent.indexOf(altStmtMarker);
+                if (stmtIdx !== -1) {
+                  bbsMessage = fullContent.slice(0, stmtIdx).trim();
+                  consumerMessage = fullContent.slice(stmtIdx).trim();
+                } else {
+                  bbsMessage = fullContent;
+                }
               }
             }
 

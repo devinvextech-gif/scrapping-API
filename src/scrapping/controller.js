@@ -14,15 +14,6 @@ if (!fs.existsSync(downloadsDir)) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // UTILITY: DOWNLOAD
-//
-// Fetches a file via Playwright's download event API (handles
-// Content-Disposition: attachment responses that cause goto() to throw).
-//
-// Returns a Buffer — does NOT touch the filesystem.
-// Callers decide what to do with the bytes (save, parse, both, neither).
-//
-// To remove: delete this function and all calls to downloadToBuffer().
-// Nothing else is affected.
 // ─────────────────────────────────────────────────────────────────────────────
 async function downloadToBuffer(context, fullUrl) {
   const dlPage = await context.newPage();
@@ -30,22 +21,15 @@ async function downloadToBuffer(context, fullUrl) {
     const [download] = await Promise.all([
       dlPage.waitForEvent("download", { timeout: 30000 }),
       dlPage.goto(fullUrl, { timeout: 30000 }).catch(() => {
-        // goto() throws "Download is starting" when the server sends
-        // Content-Disposition: attachment — expected, safe to ignore.
+        // goto() throws "Download is starting" for attachment responses — expected.
       })
     ]);
 
     const stream = await download.createReadStream();
     const chunks = [];
-    for await (const chunk of stream) {
-      chunks.push(chunk);
-    }
+    for await (const chunk of stream) chunks.push(chunk);
     const buffer = Buffer.concat(chunks);
-
-    if (buffer.length === 0) {
-      throw new Error("Downloaded file is empty (0 bytes)");
-    }
-
+    if (buffer.length === 0) throw new Error("Downloaded file is empty (0 bytes)");
     return buffer;
   } finally {
     await dlPage.close();
@@ -54,19 +38,10 @@ async function downloadToBuffer(context, fullUrl) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // UTILITY: FILESYSTEM SAVE
-//
-// Writes a Buffer to disk under downloads/complaint_<id>/<fileName>.
-// Completely independent — receives a buffer, knows nothing about how
-// it was obtained or what it contains.
-//
-// To remove: delete this function and all calls to saveBufferToDisk().
-// PDF parsing and everything else will still work.
 // ─────────────────────────────────────────────────────────────────────────────
 function saveBufferToDisk(buffer, complaintId, fileName) {
   const fileDir = path.join(downloadsDir, `complaint_${complaintId}`);
-  if (!fs.existsSync(fileDir)) {
-    fs.mkdirSync(fileDir, { recursive: true });
-  }
+  if (!fs.existsSync(fileDir)) fs.mkdirSync(fileDir, { recursive: true });
   const filePath = path.join(fileDir, fileName);
   fs.writeFileSync(filePath, buffer);
   return filePath;
@@ -74,12 +49,6 @@ function saveBufferToDisk(buffer, complaintId, fileName) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // UTILITY: PDF PARSING
-//
-// Parses text from a Buffer — does NOT read from disk, does NOT know
-// where the buffer came from.
-//
-// To remove: delete this function and all calls to parsePdfBuffer().
-// File download and filesystem save will still work.
 // ─────────────────────────────────────────────────────────────────────────────
 async function parsePdfBuffer(buffer) {
   const parser = new PDFParse({ data: buffer });
@@ -91,35 +60,17 @@ async function parsePdfBuffer(buffer) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CORE: PROCESS A SINGLE ATTACHMENT
-//
-// Orchestrates the three utilities above for one file.
-// Each step is wrapped independently — a failure in save or parse
-// does not affect the other.
-//
-// Dependency map:
-//   downloadToBuffer  ──► buffer ──► saveBufferToDisk  (independent)
-//                                └── parsePdfBuffer    (independent)
 // ─────────────────────────────────────────────────────────────────────────────
 async function processAttachment(context, { fileName, href, complaintId, currentPageUrl }) {
   const fileType = path.extname(fileName).toLowerCase();
-
-  const fullUrl = href.startsWith("http")
-    ? href
-    : new URL(href, currentPageUrl).href;
+  const fullUrl = href.startsWith("http") ? href : new URL(href, currentPageUrl).href;
 
   const result = {
-    fileName,
-    fileType,
-    url: fullUrl,
-    status: "failed",
-    localPath: null,
-    size: null,
-    saveError: null,
-    parsedText: null,
-    parseError: null
+    fileName, fileType, url: fullUrl,
+    status: "failed", localPath: null, size: null,
+    saveError: null, parsedText: null, parseError: null
   };
 
-  // Step 1: Download to buffer — shared source for all consumers below
   let buffer;
   try {
     console.log(`  → Downloading: ${fileName}`);
@@ -128,14 +79,11 @@ async function processAttachment(context, { fileName, href, complaintId, current
     result.size = buffer.length;
     console.log(`  ✓ Downloaded ${buffer.length} bytes`);
   } catch (err) {
-    result.status = "failed";
     result.saveError = err.message;
     console.error(`  ✗ Download failed: ${err.message}`);
     return result;
   }
 
-  // Step 2: Save to filesystem — independent consumer of the buffer
-  // Remove this block to disable disk saving. Parsing below still works.
   try {
     result.localPath = saveBufferToDisk(buffer, complaintId, fileName);
     console.log(`  ✓ Saved to disk: ${result.localPath}`);
@@ -144,8 +92,6 @@ async function processAttachment(context, { fileName, href, complaintId, current
     console.error(`  ✗ Disk save failed: ${err.message}`);
   }
 
-  // Step 3: Parse PDF text — independent consumer of the same buffer
-  // Remove this block to disable PDF parsing. Disk save above still works.
   if (fileType === ".pdf") {
     try {
       console.log(`  → Parsing PDF text: ${fileName}`);
@@ -161,19 +107,12 @@ async function processAttachment(context, { fileName, href, complaintId, current
 }
 
 export async function extract(req, res) {
-  // const payload = Array.isArray(req.body) ? req.body[0] : req.body;
-  // const { extractedUrl: url, extractedCode: code } = payload;
-
   const wrappedPayload = Array.isArray(req.body) ? req.body[0] : req.body;
-// Support both old format and new nested format
   const payload = wrappedPayload.payload || wrappedPayload;
   const { extractedUrl: url, extractedCode: code } = payload;
 
   if (!url || !code) {
-    return res.status(400).json({
-      success: false,
-      error: "Missing extractedUrl or extractedCode"
-    });
+    return res.status(400).json({ success: false, error: "Missing extractedUrl or extractedCode" });
   }
 
   let browser;
@@ -196,7 +135,6 @@ export async function extract(req, res) {
       'input[placeholder*="code" i]',
       "#code"
     ];
-
     let codeInput = null;
     for (const selector of codeInputSelectors) {
       codeInput = await page.$(selector);
@@ -214,7 +152,6 @@ export async function extract(req, res) {
       'button:has-text("Continue")',
       'input[type="submit"]'
     ];
-
     let submitted = false;
     for (const selector of submitButtonSelectors) {
       const btn = await page.$(selector);
@@ -236,9 +173,7 @@ export async function extract(req, res) {
       const getFieldValue = (labelText) => {
         const labels = Array.from(document.querySelectorAll("label"));
         const label = labels.find(
-          (l) =>
-            l.innerText?.trim() === labelText ||
-            l.innerText?.trim().startsWith(labelText)
+          (l) => l.innerText?.trim() === labelText || l.innerText?.trim().startsWith(labelText)
         );
         if (label) {
           const parent = label.closest(".form-group");
@@ -284,7 +219,7 @@ export async function extract(req, res) {
     const safeComplaintId = complaintInfo.complaintId || "unknown";
 
     // ──────────────────────────────────────────
-    // STEP 2B: COLLECT & PROCESS ATTACHMENTS
+    // STEP 2B: COLLECT & PROCESS INITIAL ATTACHMENTS
     // ──────────────────────────────────────────
     const downloadedFiles = [];
     const currentPageUrl = page.url();
@@ -294,16 +229,10 @@ export async function extract(req, res) {
     try {
       const allLinks = await page.$$eval("a[href*='LibAttachment']", (links) =>
         links
-          .filter((link) => link.getAttribute("href")?.includes("LibAttachment"))
           .map((link) => ({
-            fileName:
-              link.innerText?.trim() ||
-              link.getAttribute("title") ||
-              "unknown_file",
+            fileName: link.innerText?.trim() || link.getAttribute("title") || "unknown_file",
             href: link.getAttribute("href"),
-            complaintId: new URLSearchParams(
-              link.getAttribute("href").split("?")[1] || ""
-            ).get("ComplaintID")
+            complaintId: new URLSearchParams(link.getAttribute("href").split("?")[1] || "").get("ComplaintID")
           }))
           .filter((item) => item.fileName && item.href)
       );
@@ -314,7 +243,6 @@ export async function extract(req, res) {
         seen.add(f.fileName);
         return true;
       });
-
       console.log(`✓ Found ${mediaFiles.length} unique attachment(s) on page`);
     } catch (err) {
       console.log("✗ No attachment links found:", err.message);
@@ -332,130 +260,235 @@ export async function extract(req, res) {
     }
 
     // ──────────────────────────────────────────
-    // STEP 3: EXTRACT MESSAGES & THEIR ATTACHMENTS
+    // STEP 3: EXTRACT MESSAGES FROM MAIN PAGE TABLE
+    //
+    // Reads the messages grid already rendered on the main page:
+    //   - message count (number of tbody rows)
+    //   - subject, date, from/to actor (from icon title attributes)
+    //   - MessageID (from Telerik _clientKeyValues JSON in inline script)
+    //   - chk token (from hidden 6th column cell)
+    //
+    // Then opens each message URL in a separate page to read the full text.
+    // NO modal is opened or clicked.
     // ──────────────────────────────────────────
     const messagesData = [];
     const documentsData = [];
 
-    // Extract message metadata (MessageID, chk, subject, date) from table without clicking
+    // ── 3a: Read table rows on the main page ─────────────────────────────────
     const messageMetadata = await page.evaluate(() => {
-      const rows = Array.from(document.querySelectorAll("table.rgMasterTable tbody tr"));
-      return rows.map((row, index) => {
+      // Extract MessageID map from the Telerik grid init script.
+      // _clientKeyValues looks like: {"0":{"MessageID":"101518764"},"1":{"MessageID":"101402859"}}
+      // We must match the full nested object — [^}]+ stops at the first }, so we use a
+      // greedy match up to the closing double-brace instead.
+      const messageIdMap = {};
+      try {
+        const scripts = Array.from(document.querySelectorAll("script"));
+        for (const s of scripts) {
+          // Match the full _clientKeyValues value: starts with { ends with }}
+          const match = s.textContent.match(/"_clientKeyValues"\s*:\s*(\{(?:[^{}]|\{[^{}]*\})*\})/);
+          if (match) {
+            const parsed = JSON.parse(match[1]);
+            for (const [rowIdx, obj] of Object.entries(parsed)) {
+              if (obj.MessageID) messageIdMap[Number(rowIdx)] = String(obj.MessageID);
+            }
+            break;
+          }
+        }
+      } catch (_) {}
+
+      // Resolve actor name from the icon title in a cell
+      const resolveActor = (cell) => {
+        const icon = cell ? cell.querySelector("i[title]") : null;
+        return icon ? icon.getAttribute("title") : "";
+      };
+
+      // Target specifically the messages grid table (not the attachments table)
+      const rows = Array.from(
+        document.querySelectorAll("#ctl00_cp1_msg_rg table.rgMasterTable tbody tr")
+      );
+
+      return rows.map((row, idx) => {
         const cells = row.querySelectorAll("td");
-        if (cells.length < 6) return null;
-        
-        const subject = cells[3]?.innerText?.trim() || "";
+        if (cells.length < 5) return null;
+
+        const from     = resolveActor(cells[1]); // icon title: "Business" or "BBB"
+        const to       = resolveActor(cells[2]); // icon title: "BBB" or "Business"
+        const subject  = cells[3]?.innerText?.trim() || "";
         const dateSent = cells[4]?.innerText?.trim() || "";
-        const chkCell = cells[5]; // hidden cell with chk value
-        const chk = chkCell?.innerText?.trim() || "";
-        
-        // Get MessageID from data key
-        const messageId = row.getAttribute("id")?.match(/\d+$/)?.[0] || "";
-        
-        return { index: index + 1, subject, dateSent, chk, messageId };
-      }).filter(m => m && m.messageId && m.chk);
+        // Column 5 (display:none) holds the chk token as raw text
+        const chk      = cells[5]?.innerText?.trim() || "";
+
+        const messageId = messageIdMap[idx] || row.getAttribute("id")?.split("__").pop() || "";
+
+        return { index: idx + 1, from, to, subject, dateSent, chk, messageId };
+      }).filter(Boolean);
     });
 
-    console.log(`\nFound ${messageMetadata.length} messages to process`);
+    console.log(`\nFound ${messageMetadata.length} message(s) in main page table`);
 
-    // Process each message by navigating to its URL directly (avoids modal clicking issues)
+    // ── 3b: Fetch full text for each message via its direct URL ──────────────
+    const pageOrigin = new URL(currentPageUrl).origin;
+
     for (const msgMeta of messageMetadata) {
-      try {
-        console.log(`\nProcessing message ${msgMeta.index}: ${msgMeta.subject}`);
-        
-        // Navigate directly to message URL instead of clicking
-        const messageUrl = `${currentPageUrl.split("?")[0].replace("/complaints", "/complaints/message")}?msg=${msgMeta.messageId}&chk=${msgMeta.chk}`;
-        await page.goto(messageUrl, { waitUntil: "networkidle", timeout: 60000 });
-        await page.waitForTimeout(1500);
+      console.log(`\nMessage ${msgMeta.index}: "${msgMeta.subject}" (id=${msgMeta.messageId}, chk=${msgMeta.chk})`);
 
-        // Extract message data from the loaded page
-        const msgData = await page.evaluate(() => {
-          // Check if we're in an iframe or main page context
-          const from = document.querySelector("span#cp1_mv1_lblFrom")?.innerText?.trim() ||
-                       document.querySelector("span[id*='lblFrom']")?.innerText?.trim() || "";
-          const toElements = document.querySelectorAll(".fld");
-          const to = toElements.length > 1 ? toElements[1].innerText?.trim() : "";
-          const sent = document.querySelector("span#cp1_mv1_lblSent")?.innerText?.trim() ||
-                       document.querySelector("span[id*='lblSent']")?.innerText?.trim() || "";
-          const sectionToPrint = document.querySelector("#section-to-print");
-          const fullContent = sectionToPrint ? sectionToPrint.innerText?.trim() : "";
+      let msgData = {
+        sent: "",
+        from: msgMeta.from,
+        to: msgMeta.to,
+        subject: msgMeta.subject,
+        fullContent: "",
+        bbsMessage: null,
+        consumerMessage: null,
+        attachments: []
+      };
 
-          let consumerMessage = null;
-          let bbsMessage = null;
-          if (fullContent) {
-            const marker = "MESSAGE FROM CONSUMER:";
-            if (fullContent.includes(marker)) {
-              const parts = fullContent.split(marker);
-              bbsMessage = parts[0].trim();
-              consumerMessage = parts[1].trim();
-            } else {
-              bbsMessage = fullContent;
-            }
-          }
-          return { from, to, sent, fullContent, bbsMessage, consumerMessage };
-        });
+      if (msgMeta.messageId && msgMeta.chk) {
+        // Message viewer URL pattern from the source HTML's viewMsg() function
+        const messageUrl = `${pageOrigin}/complaints/message/?msg=${msgMeta.messageId}&chk=${msgMeta.chk}`;
+        console.log(`  → Fetching: ${messageUrl}`);
 
-        let attachmentLinks = [];
+        const msgPage = await context.newPage();
         try {
-          attachmentLinks = await page.$$eval("a[href*='LibAttachment']", (links) =>
-            links
-              .map((link) => ({
+          await msgPage.goto(messageUrl, { waitUntil: "networkidle", timeout: 60000 });
+          await msgPage.waitForTimeout(1000);
+          await msgPage
+            .waitForSelector(".msg, #section-to-print, span[id*='lblFrom']", { timeout: 10000 })
+            .catch(() => {});
+
+          const extracted = await msgPage.evaluate(() => {
+            // Read labelled span fields
+            const spanText = (idFragment) => {
+              const el = document.querySelector(`span[id*="${idFragment}"]`);
+              return el ? el.innerText?.trim() : "";
+            };
+
+            // Read .fld sibling of a .font-weight-bold label
+            const fieldByLabel = (labelPartial) => {
+              const rows = Array.from(document.querySelectorAll(".form-group.row"));
+              for (const row of rows) {
+                const label = row.querySelector(".font-weight-bold");
+                if (label && label.innerText.includes(labelPartial)) {
+                  const fld = row.querySelector(".fld");
+                  return fld ? fld.innerText?.trim() : "";
+                }
+              }
+              return "";
+            };
+
+            const sent    = spanText("lblSent");
+            const from    = spanText("lblFrom") || fieldByLabel("From:");
+            const to      = fieldByLabel("To:");
+            const subject = spanText("lblSubject") || fieldByLabel("Subject:");
+
+            // #section-to-print is visibility:hidden by default (only shown on @media print)
+            // so innerText returns "". Use #trmsg which is always visible — it wraps the
+            // "originally read on" alert + the actual letter content.
+            // We want just the letter body, so skip the alert-dark banner at the top.
+            let fullContent = "";
+            const trmsg = document.querySelector("#trmsg");
+            if (trmsg) {
+              // Remove the "This message originally read on..." alert text
+              const clone = trmsg.cloneNode(true);
+              const alertBanner = clone.querySelector(".alert-dark");
+              if (alertBanner) alertBanner.remove();
+              fullContent = clone.innerText?.trim() || "";
+            }
+            if (!fullContent) {
+              // Fallback: try .msg wrapper
+              const msgDiv = document.querySelector(".msg");
+              if (msgDiv) fullContent = msgDiv.innerText?.trim() || "";
+            }
+
+            // Split consumer statement from BBB letter body
+            let bbsMessage = null;
+            let consumerMessage = null;
+            if (fullContent) {
+              const marker = "Customer\u2019s Statement of the Problem:";
+              const altMarker = "Customer's Statement of the Problem:";
+              const markerIdx = fullContent.indexOf(marker) !== -1
+                ? fullContent.indexOf(marker)
+                : fullContent.indexOf(altMarker);
+
+              if (markerIdx !== -1) {
+                bbsMessage = fullContent.slice(0, markerIdx).trim();
+                consumerMessage = fullContent.slice(markerIdx).trim();
+              } else {
+                bbsMessage = fullContent;
+              }
+            }
+
+            return { sent, from, to, subject, fullContent, bbsMessage, consumerMessage };
+          });
+
+          console.log(`  ✓ from="${extracted.from}" to="${extracted.to}" content=${extracted.fullContent.length} chars`);
+
+          // Collect attachments listed inside this message page
+          let attachmentLinks = [];
+          try {
+            attachmentLinks = await msgPage.$$eval("a[href*='LibAttachment']", (links) =>
+              links.map((link) => ({
                 fileName: link.innerText?.trim(),
                 href: link.getAttribute("href")
-              }))
-              .filter((l) => l.fileName && l.href)
-          );
-        } catch (e) {
-          console.log("  No attachments in this message");
-        }
+              })).filter((l) => l.fileName && l.href)
+            );
+          } catch (_) {}
 
-        for (const link of attachmentLinks) {
-          if (!documentsData.some((d) => d.fileName === link.fileName)) {
-            documentsData.push({
-              fileName: link.fileName,
-              url: link.href,
-              complaintId: safeComplaintId
-            });
+          for (const link of attachmentLinks) {
+            if (!documentsData.some((d) => d.fileName === link.fileName)) {
+              documentsData.push({ fileName: link.fileName, url: link.href, complaintId: safeComplaintId });
+            }
+            if (!downloadedFiles.some((d) => d.fileName === link.fileName)) {
+              console.log(`  Downloading message attachment: ${link.fileName}`);
+              const fileResult = await processAttachment(context, {
+                fileName: link.fileName,
+                href: link.href,
+                complaintId: safeComplaintId,
+                currentPageUrl: messageUrl
+              });
+              downloadedFiles.push(fileResult);
+            }
           }
 
-          if (downloadedFiles.some((d) => d.fileName === link.fileName)) {
-            console.log(`  Skipping already-processed: ${link.fileName}`);
-            continue;
-          }
+          msgData = {
+            sent:            extracted.sent,
+            from:            extracted.from || msgMeta.from,
+            to:              extracted.to   || msgMeta.to,
+            subject:         extracted.subject || msgMeta.subject,
+            fullContent:     extracted.fullContent,
+            bbsMessage:      extracted.bbsMessage,
+            consumerMessage: extracted.consumerMessage,
+            attachments:     attachmentLinks
+          };
 
-          console.log(`\nProcessing message attachment: ${link.fileName}`);
-          const fileResult = await processAttachment(context, {
-            fileName: link.fileName,
-            href: link.href,
-            complaintId: safeComplaintId,
-            currentPageUrl: messageUrl
-          });
-          downloadedFiles.push(fileResult);
+        } catch (err) {
+          console.error(`  ✗ Failed to fetch message page: ${err.message}`);
+        } finally {
+          await msgPage.close();
         }
-
-        messagesData.push({
-          index: msgMeta.index,
-          subject: msgMeta.subject,
-          dateSent: msgMeta.dateSent,
-          from: msgData.from,
-          to: msgData.to,
-          sent: msgData.sent,
-          messageType: msgMeta.subject?.toLowerCase().includes("consumer")
-            ? "consumer_comment"
-            : "bbb_message",
-          bbsMessage: msgData.bbsMessage,
-          consumerMessage: msgData.consumerMessage,
-          fullContent: msgData.fullContent,
-          attachments: attachmentLinks
-        });
-
-        // Navigate back to main complaint page
-        await page.goto(url, { waitUntil: "networkidle", timeout: 60000 });
-        await page.waitForTimeout(1000);
-
-      } catch (error) {
-        console.error(`Error processing message ${msgMeta.index}:`, error.message);
+      } else {
+        console.log("  ⚠ Missing messageId or chk — skipping full content fetch");
       }
+
+      // Determine message type from the "from" actor
+      let messageType = "bbb_message";
+      if (msgMeta.from === "Business") messageType = "business_response";
+      else if (msgMeta.from === "Consumer") messageType = "consumer_comment";
+
+      messagesData.push({
+        index:           msgMeta.index,
+        messageId:       msgMeta.messageId,
+        subject:         msgData.subject,
+        dateSent:        msgMeta.dateSent,
+        sent:            msgData.sent,
+        from:            msgData.from,
+        to:              msgData.to,
+        messageType,
+        bbsMessage:      msgData.bbsMessage,
+        consumerMessage: msgData.consumerMessage,
+        fullContent:     msgData.fullContent,
+        attachments:     msgData.attachments
+      });
     }
 
     // ──────────────────────────────────────────
@@ -475,13 +508,10 @@ export async function extract(req, res) {
         downloadLocation: path.join(downloadsDir, `complaint_${safeComplaintId}`)
       }
     });
+
   } catch (err) {
     console.error("Extraction error:", err);
-    return res.status(500).json({
-      success: false,
-      error: err.message,
-      details: err.stack
-    });
+    return res.status(500).json({ success: false, error: err.message, details: err.stack });
   } finally {
     if (browser) await browser.close();
   }
